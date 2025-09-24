@@ -202,7 +202,7 @@ if st.session_state.info:
             # 「全選」checkbox 的 value 僅作為初始/對齊顯示；狀態以 selected_langs 為準
             st.checkbox(
                 "全選 (Select All)",
-                value=is_all_selected,
+                #value=is_all_selected,
                 key='select_all_langs_cb',        # 用新 key，避開舊殘留
                 on_change=handle_select_all,
             )
