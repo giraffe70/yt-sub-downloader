@@ -5,12 +5,11 @@ from slugify import slugify
 import re
 import html
 
-# --- Using correct imports ---
 from utils.fetch_info import fetch_video_info, get_available_subtitles, fetch_comments
 import utils.subtitle_handler as submod
 
 st.set_page_config(page_title="YouTube Downloader", page_icon="💬", layout="centered")
-st.title("💬 YouTube Subtitle & Comment Downloader")
+st.title("💬 YouTube 字幕與留言下載器")
 
 # --- Session State ---
 keys_to_init = {
@@ -25,6 +24,7 @@ keys_to_init = {
     "comments": [],
     "comments_text_for_download": "",
     "total_comment_count": 0,
+    "combined_text_for_download": {},
 }
 for key, value in keys_to_init.items():
     if key not in st.session_state:
@@ -34,7 +34,6 @@ for key, value in keys_to_init.items():
 def reset_page():
     """全面重設頁面狀態至初始值。"""
     # 手動清除與字幕下載相關的快取
-    #get_preview_content.clear()
     submod.download_subtitles_in_batch.clear()
 
     # 遍歷初始設定，將 session_state 恢復到預設值
@@ -114,10 +113,9 @@ with st.form("parse_form"):
 
 if submit_parse:
     # 手動清除與字幕下載相關的快取，確保處理新影片時不會用到舊資料
-    #get_preview_content.clear()
     submod.download_subtitles_in_batch.clear()
     
-    # 僅重置非 widget 狀態；不要碰任何 widget key
+    # 僅重置非 widget 狀態
     reset_keys = [
         "info", "title", "subtitles", "processed_results",
         "comments", "comments_text_for_download", "preview_lang",
@@ -129,13 +127,10 @@ if submit_parse:
         else:
             st.session_state[key] = keys_to_init.get(key, None)
 
-    # 清除動態語言 checkbox 的 widget key（在建立之前清一次最安全）
+    # 清除動態語言 checkbox 的 widget key
     for k in list(st.session_state.keys()):
         if k.startswith("chk-"):
             st.session_state.pop(k, None)
-            
-    # 追加清理：移除舊版全選 key（若曾使用過）
-    #st.session_state.pop("select_all_langs", None)
 
     if st.session_state.url_input.strip():
         with st.spinner("Parsing video..."):
@@ -144,7 +139,6 @@ if submit_parse:
                 st.session_state.info = full_info
                 st.session_state.title = full_info.get("title", "Untitled Video")
                 st.session_state.subtitles = get_available_subtitles(full_info)
-                #st.session_state.total_comment_count = full_info.get("comment_count", 0)
                 st.session_state.total_comment_count = full_info.get("comment_count") or 0
             except Exception as e:
                 st.error(f"解析影片失敗：\n{e}")
@@ -155,55 +149,45 @@ if st.session_state.info:
     st.success(f"影片標題： {st.session_state.title}")
     st.markdown("---")
 
-    st.subheader("字幕功能 (Subtitle Features)")
+    st.subheader("字幕功能")
     if st.session_state.subtitles:
         with st.expander("Click to expand subtitle options", expanded=True):
-            st.markdown("##### 1. 選擇字幕語言 (Select Subtitle Languages)")
+            st.markdown("##### 1. 選擇字幕語言")
 
-            # Callbacks：只改唯一事實來源 selected_langs，不動任何 widget key
             def handle_select_all():
                 """由「全選」按鈕觸發。根據按鈕的新狀態來更新 selected_langs，並同步所有子選項的狀態。"""
                 is_checked = st.session_state.select_all_langs_cb
                 all_langs = st.session_state.subtitles.keys()
-
                 if is_checked:
                     st.session_state.selected_langs = set(all_langs)
                 else:
                     st.session_state.selected_langs = set()
-
                 # 同步所有子選項的 UI 狀態
                 for lang in all_langs:
                     st.session_state[f"chk-{lang}"] = is_checked
-
 
             def handle_single_lang_toggle(lang):
                 """由單一語言按鈕觸發，並同步 '全選' 按鈕的狀態。"""
                 # 1. 直接讀取觸發此函式的 widget 的「新狀態」
                 is_checked = st.session_state[f"chk-{lang}"]
-
                 # 2. 根據新狀態更新資料來源 (selected_langs)
                 if is_checked:
                     st.session_state.selected_langs.add(lang)
                 else:
                     st.session_state.selected_langs.discard(lang)
-
-                # 3. 同步 '全選' 按鈕的 UI 狀態 (這部分不變)
+                # 3. 同步 '全選' 按鈕的 UI 狀態
                 all_langs = set(st.session_state.subtitles.keys())
                 if all_langs and st.session_state.selected_langs == all_langs:
                     st.session_state.select_all_langs_cb = True
                 else:
                     st.session_state.select_all_langs_cb = False
 
-            # 由來源推導 UI 狀態
             all_langs = set(st.session_state.subtitles.keys())
             is_all_selected = (st.session_state.selected_langs == all_langs) if all_langs else False
 
-            # 渲染 UI
-            # 「全選」checkbox 的 value 僅作為初始/對齊顯示；狀態以 selected_langs 為準
             st.checkbox(
                 "全選 (Select All)",
-                #value=is_all_selected,
-                key='select_all_langs_cb',        # 用新 key，避開舊殘留
+                key='select_all_langs_cb', 
                 on_change=handle_select_all,
             )
 
@@ -216,25 +200,25 @@ if st.session_state.info:
                     st.checkbox(
                         label,
                         value=(lang in st.session_state.selected_langs),
-                        key=f"chk-{lang}",                         # 動態 widget key
+                        key=f"chk-{lang}",                      # 動態 widget key
                         on_change=handle_single_lang_toggle,
                         args=(lang,),
                     )
 
             st.markdown("---")
-            st.markdown("##### 📝 字幕預覽 (Subtitle Preview)")
+            st.markdown("##### 📝 字幕預覽")
             selected_langs_list = sorted(list(st.session_state.selected_langs))
             if not selected_langs_list:
-                st.info("請至少選擇一種語言以進行預覽 (Please select a language to preview.)")
+                st.info("請至少選擇一種語言以進行預覽")
             else:
                 st.selectbox(
-                    "Select language to preview",
+                    "選擇字幕語言",
                     options=selected_langs_list,
                     key="preview_lang"
                 )
 
                 if st.session_state.preview_lang:
-                    with st.spinner(f"正在載入字幕預覽..."):
+                    with st.spinner(f"Running..."):
                         # 直接呼叫底層已快取的下載函式
                         content_dict = submod.download_subtitles_in_batch(
                             st.session_state.url_input, 
@@ -250,25 +234,24 @@ if st.session_state.info:
                         with preview_container:
                             st.code(preview_text, language=None)
 
-
             st.markdown("---")
-            st.markdown("##### 2. 選擇輸出格式 (Select Output Formats)")
+            st.markdown("##### 2. 選擇輸出格式")
             AVAILABLE_FORMATS = {"txt": "TXT (純文字)", "srt": "SRT (字幕檔)"}
             st.session_state.selected_formats = st.multiselect(
-                "可複選 (You can select multiple formats)",
+                "可複選",
                 options=list(AVAILABLE_FORMATS.keys()),
                 default=st.session_state.selected_formats,
                 format_func=lambda v: AVAILABLE_FORMATS.get(v, v)
             )
 
             st.markdown("---")
-            st.markdown("##### 3. 下載字幕 (Download Subtitles)")
-            if st.button("🚀 開始下載 (Start Download)", type="primary", use_container_width=True):
+            st.markdown("##### 3. 下載字幕")
+            if st.button("🚀 開始下載", type="primary", use_container_width=True):
                 st.session_state.processed_results = []
                 if not st.session_state.selected_langs or not st.session_state.selected_formats:
-                    st.warning("請至少選擇一種語言和一種格式 (Please select at least one language and one format.)")
+                    st.warning("請至少選擇一種語言和一種格式!")
                 else:
-                    with st.spinner("Processing subtitles..."):
+                    with st.spinner("Processing..."):
                         sorted_langs = sorted(list(st.session_state.selected_langs))
                         try:
                             all_contents = submod.download_subtitles_in_batch(st.session_state.url_input, sorted_langs)
@@ -344,7 +327,7 @@ if st.session_state.info:
 
 
     # --- Comment Feature Area ---
-    st.subheader("留言功能 (Comment Features)")
+    st.subheader("留言功能")
 
     # 檢查留言總數是否有效 (在解析後應不為 None)
     if st.session_state.total_comment_count is not None:
@@ -398,18 +381,69 @@ if st.session_state.info:
                             st.error(f"擷取留言時發生錯誤: {e}")
 
                 if st.session_state.comments:
-                    sort_text_fn = f"{'top' if st.session_state.comment_sort == 'top' else 'newest'}_{len(st.session_state.comments)}"
-                    comment_filename = create_safe_filename(st.session_state.title, lang_or_suffix=sort_text_fn, fmt="txt", is_comment=True)
-                    st.download_button(
-                        label=f"📥 Download",
-                        data=st.session_state.comments_text_for_download.encode('utf-8'),
-                        file_name=comment_filename,
-                        mime="text/plain",
-                        use_container_width=True,
-                        type="primary"
-                    )
+                    # --- 建立合併字幕與留言的邏輯 ---
+                    st.session_state.combined_text_for_download = {}
+                    # 檢查使用者是否已選擇了字幕語言，且只處理 txt 格式
+                    if st.session_state.selected_langs and "txt" in st.session_state.selected_formats:
+                        # 找到已處理好的 txt 字幕結果
+                        processed_txt_subs = {
+                            item[0][0]: item[1].decode('utf-8') 
+                            for item in st.session_state.processed_results 
+                            if item[1] and item[0][1] == 'txt'
+                        }
+
+                        if processed_txt_subs:
+                            # 使用正規表示式精準分離標頭和留言內容
+                            full_comment_text = st.session_state.comments_text_for_download
+                            comment_header_pattern = re.search(r"【.*?留言】:\n", full_comment_text)
+                            
+                            if comment_header_pattern:
+                                comments_start_index = comment_header_pattern.end()
+                                comments_only_text = full_comment_text[comments_start_index:]
+                            else:
+                                # 如果找不到標頭，則將全部文字視為留言
+                                comments_only_text = full_comment_text
+
+                            # 為每個已處理的字幕語言，產生一個合併檔案
+                            for lang, sub_content in processed_txt_subs.items():
+                                # 按照正確格式組合文字，並加上【留言】：標頭
+                                combined_content = f"{sub_content}\n\n---\n【留言】：\n{comments_only_text}"
+                                st.session_state.combined_text_for_download[lang] = combined_content.encode('utf-8')
+                    
+                    # --- UI 渲染 ---
+                    # 建立兩欄來放置不同的下載按鈕
+                    dl_col_1, dl_col_2 = st.columns(2)
+
+                    with dl_col_1:
+                        sort_text_fn = f"{'top' if st.session_state.comment_sort == 'top' else 'newest'}_{len(st.session_state.comments)}"
+                        comment_filename = create_safe_filename(st.session_state.title, lang_or_suffix=sort_text_fn, fmt="txt", is_comment=True)
+                        st.download_button(
+                            label="📥 下載留言",
+                            data=st.session_state.comments_text_for_download.encode('utf-8'),
+                            file_name=comment_filename,
+                            mime="text/plain",
+                            use_container_width=True,
+                        )
+                    
+                    with dl_col_2:
+                        # 如果有可合併的內容，則顯示合併下載按鈕
+                        if st.session_state.combined_text_for_download:
+                            # 預設使用第一個可用的語言來命名和下載
+                            first_lang = list(st.session_state.combined_text_for_download.keys())[0]
+                            combined_data = st.session_state.combined_text_for_download[first_lang]
+                            
+                            combined_filename = create_safe_filename(st.session_state.title, lang_or_suffix=f"{first_lang}_full", fmt="txt")
+                            st.download_button(
+                                label="📜 下載字幕與留言",
+                                data=combined_data,
+                                file_name=combined_filename,
+                                mime="text/plain",
+                                use_container_width=True,
+                                type="primary"
+                            )
+
                     st.markdown("---")
-                    st.markdown("##### 留言預覽 (Comment Preview)")
+                    st.markdown("##### 留言預覽")
                     comment_container = st.container(height=400, border=True)
                     with comment_container:
                         if not st.session_state.comments:
