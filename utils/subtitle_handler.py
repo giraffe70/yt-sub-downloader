@@ -10,62 +10,8 @@ import tempfile
 from typing import Optional, List, Dict
 import streamlit as st
 import time
-
-@st.cache_data(ttl=3600)
-def download_subtitles_in_batch(url: str, langs: List[str]) -> Dict[str, Optional[str]]:
-    if not langs:
-        return {}
-
-    results = {lang: None for lang in langs}
-    with tempfile.TemporaryDirectory() as temp_dir:
-        subtitle_template = os.path.join(temp_dir, '%(id)s.%(lang)s.vtt')
-        
-        ydl_opts = {
-            'writesubtitles': True, 
-            'writeautomaticsub': True, 
-            'subtitleslangs': langs,
-            'subtitlesformat': 'vtt', 
-            'skip_download': True, 
-            'quiet': True, 
-            'no_warnings': True,
-            "ignoreerrors": True,
-            'outtmpl': {'subtitle': subtitle_template},
-            "http_headers": {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.5',
-            }
-        }
-
-        # 重試邏輯
-        max_retries = 1
-        for attempt in range(max_retries + 1):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    video_id = info.get('id')
-
-                if video_id:
-                    for lang in langs:
-                        for actual_file in os.listdir(temp_dir):
-                            if actual_file.startswith(video_id) and lang in actual_file:
-                                filepath = os.path.join(temp_dir, actual_file)
-                                with open(filepath, 'r', encoding='utf-8') as f:
-                                    results[lang] = f.read()
-                                break
-                return results # 成功後直接返回結果
-            
-            except Exception as e:
-                if 'HTTP Error 429' in str(e) and attempt < max_retries:
-                    print(f"Rate limited during download_subtitles. Retrying in 5 seconds... (Attempt {attempt + 1})")
-                    # 在重試前，清除暫存資料夾中可能已下載的部分檔案
-                    for item in os.listdir(temp_dir):
-                        os.remove(os.path.join(temp_dir, item))
-                    time.sleep(5)
-                    continue # 繼續下一次重試
-                else:
-                    raise e # 如果不是 429 錯誤，或已達最大重試次數，則拋出錯誤
-
-    return results # 如果重試失敗，返回空的結果
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def convert_vtt_to_txt(vtt_content: str) -> str:
@@ -84,7 +30,12 @@ def convert_vtt_to_txt(vtt_content: str) -> str:
 
 def convert_vtt_to_srt(vtt_content: str) -> str:
     if not vtt_content: return ""
-    return vtt_content.replace('.', ',', 2).lstrip("WEBVTT\n\n")
+    # WEBVTT header might not always be present, but cleaning it up is good
+    content = re.sub(r'WEBVTT\s*', '', vtt_content).strip()
+    # VTT uses '.' for milliseconds, SRT uses ','
+    # This regex is safer than a simple replace, targeting only timestamps
+    content = re.sub(r'(\d{2}:\d{2}:\d{2})\.(\d{3})', r'\1,\2', content)
+    return content
 
 def create_zip_in_memory(files_data: Dict[str, bytes]) -> Optional[bytes]:
     if not files_data: return None
@@ -99,3 +50,65 @@ def create_zip_in_memory(files_data: Dict[str, bytes]) -> Optional[bytes]:
     except Exception as e:
         print(f"Error creating ZIP in memory: {e}")
         return None
+
+# --- 下載函式 ---
+def fetch_url_content(url: str, timeout: int = 10) -> Optional[str]:
+    """使用 requests 抓取單一 URL 的內容"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+        response = requests.get(url, timeout=timeout, headers=headers)
+        response.raise_for_status()  # 如果請求失敗 (如 404, 500)，會拋出異常
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to download {url}: {e}")
+        return None
+
+def download_subtitles_concurrently(lang_to_url_map: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """
+    使用執行緒池並行下載所有提供的字幕 URL。
+    - lang_to_url_map: 一個字典，格式為 { '語言代碼': '字幕VTT檔URL' }
+    """
+    results = {}
+    # 使用 ThreadPoolExecutor 來並行處理網路請求
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        # 建立 future -> lang 的映射，方便稍後取回結果
+        future_to_lang = {executor.submit(fetch_url_content, url): lang for lang, url in lang_to_url_map.items()}
+        
+        for future in as_completed(future_to_lang):
+            lang = future_to_lang[future]
+            try:
+                content = future.result()
+                results[lang] = content
+            except Exception as e:
+                print(f"Error fetching subtitle for {lang}: {e}")
+                results[lang] = None
+    return results
+    
+
+@st.cache_data(ttl=3600)
+def download_subtitles_in_batch(url_unused: str, langs_to_download: List[str], all_sub_info: Dict) -> Dict[str, Optional[str]]:
+    """
+    批次下載函式
+    - langs_to_download: 需要下載的語言列表。
+    - all_sub_info: 從 fetch_video_info 獲取的完整字幕資訊字典。
+    """
+    if not langs_to_download or not all_sub_info:
+        return {}
+
+    target_urls = {}
+    for lang in langs_to_download:
+        if lang in all_sub_info:
+            # 找到 vtt 格式的 URL
+            for fmt in all_sub_info[lang].get('formats', []):
+                if fmt.get('ext') == 'vtt':
+                    target_urls[lang] = fmt.get('url')
+                    break
+    
+    if not target_urls:
+        return {lang: None for lang in langs_to_download}
+
+    return download_subtitles_concurrently(target_urls)
+    
